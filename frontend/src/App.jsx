@@ -4,6 +4,46 @@ import { BookOpen } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import CustomerHistory from './pages/CustomerHistory';
 
+// Intercept fetch and window.open to support Supabase Edge Functions without modifying other files
+const originalFetch = window.fetch;
+window.fetch = async (url, options = {}) => {
+  const apiUrl = import.meta.env.VITE_API_URL || '';
+  const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+  
+  let targetUrl = url;
+  if (typeof url === 'string' && url.startsWith('/api')) {
+    if (apiUrl) {
+      targetUrl = `${apiUrl}${url}`;
+    }
+    if (supabaseKey) {
+      options.headers = {
+        ...options.headers,
+        'apikey': supabaseKey,
+        'Authorization': `Bearer ${supabaseKey}`
+      };
+    }
+  }
+  return originalFetch(targetUrl, options);
+};
+
+const originalOpen = window.open;
+window.open = (url, name, specs) => {
+  const apiUrl = import.meta.env.VITE_API_URL || '';
+  const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+  
+  let targetUrl = url;
+  if (typeof url === 'string' && url.startsWith('/api')) {
+    if (apiUrl) {
+      targetUrl = `${apiUrl}${url}`;
+    }
+    if (supabaseKey) {
+      const separator = targetUrl.includes('?') ? '&' : '?';
+      targetUrl = `${targetUrl}${separator}apikey=${supabaseKey}`;
+    }
+  }
+  return originalOpen(targetUrl, name, specs);
+};
+
 // Simple Navigation Link component to handle active class manually/elegantly
 function NavLink({ to, children }) {
   const location = useLocation();

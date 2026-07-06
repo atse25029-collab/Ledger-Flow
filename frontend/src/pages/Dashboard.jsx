@@ -14,7 +14,6 @@ import {
   Download,
   Upload
 } from 'lucide-react';
-import { supabase } from '../supabaseClient';
 
 // Custom SVG Grouped Bar Chart for Monthly Cash Flow
 function CashFlowChart({ data }) {
@@ -282,106 +281,23 @@ function Dashboard() {
       setLoading(true);
       setError(null);
 
-      // 1. Fetch customers
-      const { data: custData, error: custErr } = await supabase
-        .from('customers')
-        .select('*')
-        .order('name', { ascending: true });
+      // Fetch summary statistics
+      const statsRes = await fetch('/api/dashboard/summary');
+      if (!statsRes.ok) throw new Error('Failed to fetch summary statistics');
+      const statsData = await statsRes.json();
+      setStats(statsData);
 
-      if (custErr) throw new Error(custErr.message || 'Failed to fetch customers list');
+      // Fetch customer list
+      const customersRes = await fetch('/api/customers');
+      if (!customersRes.ok) throw new Error('Failed to fetch customers list');
+      const customersData = await customersRes.json();
+      setCustomers(customersData);
 
-      // 2. Fetch pending transactions
-      const { data: pendingTxs, error: txErr } = await supabase
-        .from('transactions')
-        .select('customer_id, amount, type')
-        .eq('status', 'Pending');
-
-      if (txErr) throw new Error(txErr.message || 'Failed to fetch transactions');
-
-      // Calculate totals per customer
-      const customerDues = {};
-      custData.forEach(c => {
-        customerDues[c.id] = { credit: 0, debit: 0 };
-      });
-
-      pendingTxs.forEach(tx => {
-        if (customerDues[tx.customer_id]) {
-          if (tx.type === 'Credit') {
-            customerDues[tx.customer_id].credit += tx.amount;
-          } else {
-            customerDues[tx.customer_id].debit += tx.amount;
-          }
-        }
-      });
-
-      // Calculate stats for active customers only (where outstanding !== 0)
-      let globalCredit = 0;
-      let globalDebit = 0;
-
-      const customerList = custData.map(c => {
-        const dues = customerDues[c.id] || { credit: 0, debit: 0 };
-        const bal = dues.credit - dues.debit;
-        
-        if (bal !== 0) {
-          globalCredit += dues.credit;
-          globalDebit += dues.debit;
-        }
-
-        return {
-          id: c.id,
-          name: c.name,
-          contact: c.contact,
-          total_credit: dues.credit,
-          total_debit: dues.debit,
-          outstanding_balance: bal
-        };
-      });
-
-      setCustomers(customerList);
-      setStats({
-        total_credit: globalCredit,
-        total_debit: globalDebit,
-        net_outstanding: globalCredit - globalDebit
-      });
-
-      // 3. Fetch cashflow aggregates (last 6 months)
-      const { data: allTxs, error: cfErr } = await supabase
-        .from('transactions')
-        .select('amount, type, date')
-        .order('date', { ascending: true });
-
-      if (cfErr) throw new Error(cfErr.message || 'Failed to fetch cashflow data');
-
-      const monthlyGroups = {};
-      const monthsList = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-      allTxs.forEach(tx => {
-        if (!tx.date) return;
-        const yearMonth = tx.date.substring(0, 7); // e.g. "2026-07"
-        if (!monthlyGroups[yearMonth]) {
-          const [year, monthStr] = yearMonth.split('-');
-          const monthIdx = parseInt(monthStr, 10) - 1;
-          const monthName = monthsList[monthIdx] || monthStr;
-          monthlyGroups[yearMonth] = {
-            label: `${monthName} ${year}`,
-            credit: 0,
-            debit: 0,
-            sortKey: yearMonth
-          };
-        }
-        
-        if (tx.type === 'Credit') {
-          monthlyGroups[yearMonth].credit += tx.amount;
-        } else {
-          monthlyGroups[yearMonth].debit += tx.amount;
-        }
-      });
-
-      const sortedCashflow = Object.values(monthlyGroups)
-        .sort((a, b) => a.sortKey.localeCompare(b.sortKey))
-        .slice(-6);
-
-      setCashflowData(sortedCashflow);
+      // Fetch cashflow aggregates
+      const cashflowRes = await fetch('/api/dashboard/cashflow');
+      if (!cashflowRes.ok) throw new Error('Failed to fetch cashflow data');
+      const cfData = await cashflowRes.json();
+      setCashflowData(cfData);
     } catch (err) {
       console.error(err);
       setError(err.message || 'An error occurred while loading dashboard.');
@@ -397,29 +313,30 @@ function Dashboard() {
   // Handle adding a new customer
   const handleAddCustomer = async (e) => {
     e.preventDefault();
-    if (!newCustomer.name.trim()) return;
+    if (!newCustomer.name.trim() || !newCustomer.contact.trim()) return;
 
     setCustomerSubmitting(true);
     setCustomerSuccess(false);
     setError(null);
 
     try {
-      const { data, error: insertError } = await supabase
-        .from('customers')
-        .insert([{
-          name: newCustomer.name.trim(),
-          contact: newCustomer.contact ? newCustomer.contact.trim() : ''
-        }])
-        .select()
-        .single();
+      const res = await fetch('/api/customers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newCustomer)
+      });
 
-      if (insertError) throw new Error(insertError.message || 'Failed to create customer');
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || 'Failed to create customer');
+      }
 
       setCustomerSuccess(true);
       setNewCustomer({ name: '', contact: '' });
       
       // Auto-switch to transaction tab and select this customer
-      setNewTransaction(prev => ({ ...prev, customer_id: data.id.toString() }));
+      const createdCustomer = await res.json();
+      setNewTransaction(prev => ({ ...prev, customer_id: createdCustomer.id.toString() }));
       
       // Refresh data
       await fetchDashboardData();
@@ -446,21 +363,29 @@ function Dashboard() {
     setTransactionSuccess(false);
     setError(null);
 
+    // Map form status options to backend transaction fields
+    // "Paid" selected -> customer made a payment (type: Payment)
+    // "Pending" selected -> customer bought on credit (type: Credit)
     const transactionType = status === 'Paid' ? 'Payment' : 'Credit';
 
     try {
-      const { error: insertError } = await supabase
-        .from('transactions')
-        .insert([{
-          customer_id: parseInt(customer_id, 10),
+      const res = await fetch('/api/transactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customer_id: parseInt(customer_id),
           amount: parseFloat(amount),
           type: transactionType,
-          status: 'Pending', // always start as pending for calculations until reconciled
+          status: 'Pending', // Initialize as Pending so it remains active in calculations until reconciled
           date,
-          description: description ? description.trim() : ''
-        }]);
+          description
+        })
+      });
 
-      if (insertError) throw new Error(insertError.message || 'Failed to record transaction');
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || 'Failed to record transaction');
+      }
 
       setTransactionSuccess(true);
       setNewTransaction(prev => ({
@@ -502,12 +427,14 @@ function Dashboard() {
     setError(null);
 
     try {
-      const { error: deleteError } = await supabase
-        .from('customers')
-        .delete()
-        .eq('id', customerToDeleteId);
+      const res = await fetch(`/api/customers/${customerToDeleteId}`, {
+        method: 'DELETE'
+      });
 
-      if (deleteError) throw new Error(deleteError.message || 'Failed to delete customer');
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || 'Failed to delete customer');
+      }
 
       setDeleteSuccess(true);
       setCustomerToDeleteId('');
@@ -532,8 +459,14 @@ function Dashboard() {
 
     try {
       setError(null);
-      const { error: rpcError } = await supabase.rpc('reconcile_customer_dues', { cust_id: customerId });
-      if (rpcError) throw new Error(rpcError.message || 'Failed to reconcile dues');
+      const res = await fetch(`/api/customers/${customerId}/reconcile`, {
+        method: 'PUT'
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || 'Failed to reconcile dues');
+      }
 
       // Refresh data
       await fetchDashboardData();
@@ -614,16 +547,22 @@ function Dashboard() {
               name: nameVal,
               contact: contactVal,
               credit: creditVal,
-              debit: debitVal
+              debit: debitVal,
+              rowNum: i + 1 // Row number in file
             });
           }
         }
 
-        // Post mapped JSON payload to Supabase bulk importer RPC
-        const { error: rpcError } = await supabase.rpc('import_customers_bulk', { payload: parsedCustomers });
+        // Post mapped JSON payload to bulk importer API
+        const res = await fetch('/api/customers/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customers: parsedCustomers })
+        });
 
-        if (rpcError) {
-          throw new Error(rpcError.message || 'Failed to complete CSV import.');
+        if (!res.ok) {
+          const errData = await res.json();
+          throw new Error(errData.error || 'Failed to complete CSV import.');
         }
 
         setCsvSuccess(true);
@@ -653,7 +592,7 @@ function Dashboard() {
     const query = searchQuery.toLowerCase();
     const matchesSearch = 
       customer.name.toLowerCase().includes(query) ||
-      (customer.contact || '').toLowerCase().includes(query);
+      customer.contact.toLowerCase().includes(query);
     
     if (activeOnly) {
       // Show only customers whose net outstanding balance is not exactly 0
@@ -676,12 +615,16 @@ function Dashboard() {
 
     try {
       setError(null);
-      const { error: deleteError } = await supabase
-        .from('customers')
-        .delete()
-        .in('id', selectedCustomerIds);
+      const res = await fetch('/api/customers/bulk-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: selectedCustomerIds })
+      });
 
-      if (deleteError) throw new Error(deleteError.message || 'Failed to bulk delete customers');
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || 'Failed to bulk delete customers');
+      }
 
       setSelectedCustomerIds([]);
       await fetchDashboardData();
@@ -693,76 +636,17 @@ function Dashboard() {
   // Autocomplete filtered options (Transaction Form)
   const filteredOptions = customers.filter(c => 
     c.name.toLowerCase().includes(custSearch.toLowerCase()) ||
-    (c.contact || '').toLowerCase().includes(custSearch.toLowerCase())
+    c.contact.toLowerCase().includes(custSearch.toLowerCase())
   );
 
   // Autocomplete filtered options (Deletion Form)
   const filteredDeleteOptions = customers.filter(c => 
     c.name.toLowerCase().includes(deleteCustSearch.toLowerCase()) ||
-    (c.contact || '').toLowerCase().includes(deleteCustSearch.toLowerCase())
+    c.contact.toLowerCase().includes(deleteCustSearch.toLowerCase())
   );
 
   const selectedCustomerObj = customers.find(c => c.id.toString() === newTransaction.customer_id);
   const selectedDeleteCustomerObj = customers.find(c => c.id.toString() === customerToDeleteId);
-
-  // Client-side CSV generation & download (Transactions)
-  const handleExportTransactions = async () => {
-    try {
-      const { data, error: selectError } = await supabase
-        .from('transactions')
-        .select(`
-          id,
-          amount,
-          type,
-          status,
-          date,
-          description,
-          customers (
-            name
-          )
-        `)
-        .order('date', { ascending: false })
-        .order('id', { ascending: false });
-
-      if (selectError) throw new Error(selectError.message || 'Failed to fetch transactions');
-
-      let csvContent = 'Transaction ID,Customer Name,Amount (INR),Type,Status,Date,Description\n';
-      data.forEach(row => {
-        const customerName = row.customers ? row.customers.name : '';
-        csvContent += `"${row.id}","${customerName.replace(/"/g, '""')}","${row.amount}","${row.type}","${row.status}","${row.date}","${(row.description || '').replace(/"/g, '""')}"\n`;
-      });
-
-      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.setAttribute("href", url);
-      link.setAttribute("download", "ledger_transactions_all.csv");
-      link.style.visibility = 'hidden';
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    } catch (err) {
-      alert(err.message);
-    }
-  };
-
-  // Client-side CSV generation & download (Customers list)
-  const handleExportCustomers = () => {
-    let csvContent = 'Customer Name,Contact Details,Credit (INR),Debit (INR),Outstanding (INR)\n';
-    customers.forEach(cust => {
-      csvContent += `"${cust.name.replace(/"/g, '""')}","${(cust.contact || '').replace(/"/g, '""')}","${cust.total_credit}","${cust.total_debit}","${cust.outstanding_balance}"\n`;
-    });
-
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute("download", "customer_ledgers.csv");
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
 
   return (
     <div>
@@ -917,7 +801,7 @@ function Dashboard() {
                 )}
 
                 <button
-                  onClick={handleExportTransactions}
+                  onClick={() => window.open('/api/transactions/export')}
                   className="btn btn-secondary btn-sm"
                   title="Export all transactions to CSV"
                   style={{ height: '36px' }}
@@ -927,7 +811,7 @@ function Dashboard() {
                 </button>
 
                 <button
-                  onClick={handleExportCustomers}
+                  onClick={() => window.open('/api/customers/export')}
                   className="btn btn-secondary btn-sm"
                   title="Export all customer profiles to CSV"
                   style={{ height: '36px' }}

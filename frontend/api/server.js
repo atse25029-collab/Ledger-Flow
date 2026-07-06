@@ -204,7 +204,7 @@ app.post('/api/customers', async (req, res) => {
     res.status(201).json({ id: result.id, name, contact });
   } catch (error) {
     console.error('Error creating customer:', error);
-    res.status(500).json({ error: 'Database error creating customer' });
+    res.status(500).json({ error: `Database error creating customer: ${error.message}` });
   }
 });
 

@@ -12,7 +12,7 @@ import {
   Clock,
   Download
 } from 'lucide-react';
-const API_URL = import.meta.env.VITE_API_URL || '';
+import { supabase } from '../supabaseClient';
 
 function CustomerHistory() {
   const { id } = useParams();
@@ -27,15 +27,48 @@ function CustomerHistory() {
     try {
       setLoading(true);
       setError(null);
-      const res = await fetch(`${API_URL}/api/customers/${id}`);
-      if (!res.ok) {
-        if (res.status === 404) {
-          throw new Error('Customer profile not found');
-        }
+
+      // Fetch customer details
+      const { data: customerData, error: custError } = await supabase
+        .from('customers')
+        .select('*')
+        .eq('id', id)
+        .single();
+
+      if (custError || !customerData) {
+        throw new Error('Customer profile not found');
+      }
+
+      // Fetch transactions
+      const { data: transactionsData, error: txError } = await supabase
+        .from('transactions')
+        .select('*')
+        .eq('customer_id', id)
+        .order('date', { ascending: false })
+        .order('id', { ascending: false });
+
+      if (txError) {
         throw new Error('Failed to retrieve customer ledger details');
       }
-      const data = await res.json();
-      setCustomer(data);
+
+      // Calculate outstanding balance
+      let pendingCredit = 0;
+      let pendingDebit = 0;
+      transactionsData.forEach(tx => {
+        if (tx.status === 'Pending') {
+          if (tx.type === 'Credit') {
+            pendingCredit += tx.amount;
+          } else {
+            pendingDebit += tx.amount;
+          }
+        }
+      });
+
+      setCustomer({
+        ...customerData,
+        outstanding_balance: pendingCredit - pendingDebit,
+        transactions: transactionsData
+      });
     } catch (err) {
       console.error(err);
       setError(err.message || 'An error occurred while loading this page.');
@@ -50,10 +83,31 @@ function CustomerHistory() {
 
   // Helper to check email vs phone format
   const renderContactIcon = (contactStr) => {
-    if (contactStr.includes('@')) {
+    if (contactStr && contactStr.includes('@')) {
       return <Mail size={16} />;
     }
     return <Phone size={16} />;
+  };
+
+  // Client-side CSV export
+  const handleExportCSV = () => {
+    if (!customer || !customer.transactions) return;
+
+    let csvContent = 'Transaction ID,Amount (INR),Type,Status,Date,Description\n';
+    customer.transactions.forEach(row => {
+      csvContent += `"${row.id}","${row.amount}","${row.type}","${row.status}","${row.date}","${(row.description || '').replace(/"/g, '""')}"\n`;
+    });
+
+    const safeFilename = customer.name.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `${safeFilename}_ledger.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   if (loading && !customer) {
@@ -87,7 +141,7 @@ function CustomerHistory() {
           </button>
           
           <button 
-            onClick={() => window.open(`/api/customers/${id}/export`)} 
+            onClick={handleExportCSV} 
             className="btn btn-secondary btn-sm"
             title="Export this customer's ledger history to CSV"
           >
@@ -126,77 +180,64 @@ function CustomerHistory() {
         </div>
       </div>
 
-      {/* Bottom Section: Transaction Timeline */}
+      {/* Timeline Section */}
       <div className="card">
-        <h3 className="card-title">
+        <h3 className="card-title" style={{ marginBottom: '1.5rem' }}>
           <Clock size={20} />
-          <span>Ledger History Timeline</span>
+          <span>Ledger Dues Timeline</span>
         </h3>
 
-        {error && (
-          <div className="alert alert-error">
-            <AlertCircle size={16} />
-            <span>{error}</span>
-          </div>
-        )}
-
         {customer.transactions.length === 0 ? (
-          <div className="empty-state" style={{ padding: '4rem 1.5rem' }}>
-            <div className="empty-state-icon">
-              <FileText size={28} />
-            </div>
-            <p className="empty-state-title">No transactions recorded yet</p>
-            <p style={{ fontSize: '0.9rem' }}>Go back to the dashboard to log a credit sale or cleared payment for this customer.</p>
+          <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+            <FileText size={40} style={{ opacity: 0.15, marginBottom: '1rem' }} />
+            <p>No transaction history logged for this customer yet.</p>
           </div>
         ) : (
-          <div className="timeline">
+          <div className="timeline-container">
             {customer.transactions.map((tx) => {
-              // Format date and time (e.g., July 2, 2026, 1:45 PM)
+              const isCredit = tx.type === 'Credit';
               const formattedDate = new Date(tx.date).toLocaleDateString(undefined, {
                 year: 'numeric',
                 month: 'long',
                 day: 'numeric',
-                hour: 'numeric',
-                minute: '2-digit',
-                hour12: true
+                hour: '2-digit',
+                minute: '2-digit'
               });
-
-              const isPayment = tx.type === 'Payment';
-              const formattedAmount = isPayment 
-                ? `-₹${tx.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}`
-                : `₹${tx.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
 
               return (
                 <div key={tx.id} className="timeline-item">
-                  <div className="timeline-left">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                      <span 
-                        className="timeline-amount" 
-                        style={{ color: isPayment ? 'var(--color-success)' : 'var(--text-primary)' }}
-                      >
-                        {formattedAmount}
-                      </span>
-                      <span className={`badge ${tx.status === 'Paid' ? 'badge-paid' : (isPayment ? 'badge-paid' : 'badge-pending')}`}>
-                        {isPayment 
-                          ? (tx.status === 'Paid' ? 'Reconciled Payment' : 'Payment Offset') 
-                          : (tx.status === 'Paid' ? 'Paid' : 'Pending Dues')}
-                      </span>
+                  <div className="timeline-badge-column">
+                    <div className={`timeline-badge ${isCredit ? 'credit' : 'payment'}`}>
+                      {isCredit ? '+' : '-'}
                     </div>
-                    
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.375rem', marginTop: '0.25rem' }}>
-                      <Calendar size={12} style={{ color: 'var(--text-muted)' }} />
-                      <span className="timeline-date">{formattedDate}</span>
+                    <div className="timeline-connector"></div>
+                  </div>
+                  
+                  <div className="timeline-content-card">
+                    <div className="timeline-header">
+                      <div className="timeline-meta-group">
+                        <span className="timeline-type">{isCredit ? 'Credit Issued' : 'Payment Cleared'}</span>
+                        <div className="timeline-date-group">
+                          <Calendar size={12} />
+                          <span>{formattedDate}</span>
+                        </div>
+                      </div>
+                      
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                        <span className={`status-badge ${tx.status.toLowerCase()}`}>
+                          {tx.status === 'Paid' ? 'Reconciled' : 'Pending Dues'}
+                        </span>
+                        <span className={`timeline-amount ${isCredit ? 'credit' : 'payment'}`}>
+                          {isCredit ? '+' : '-'}₹{tx.amount.toFixed(2)}
+                        </span>
+                      </div>
                     </div>
 
                     {tx.description && (
-                      <p className="timeline-desc" style={{ marginTop: '0.5rem' }}>
-                        <span style={{ fontWeight: '500', color: 'var(--text-muted)' }}>Note:</span> {tx.description}
-                      </p>
+                      <div className="timeline-body">
+                        <p>{tx.description}</p>
+                      </div>
                     )}
-                  </div>
-
-                  <div className="timeline-right">
-                    {/* Reconcile actions are handled through bulk dashboard triggers, keeping history clean */}
                   </div>
                 </div>
               );
@@ -204,7 +245,6 @@ function CustomerHistory() {
           </div>
         )}
       </div>
-
     </div>
   );
 }
